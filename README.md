@@ -43,3 +43,14 @@ docker compose down --remove-orphans
 环境：COMPOSE_PROJECT_NAME控制隔离命名；FRONTEND_PORT/BACKEND_PORT/DB_PORT为端口；DB_PASSWORD为演示数据库密码；JWT_SECRET为签名密钥；SEED_DEMO=false关闭演示数据。命名卷db-data、redis-data、artifacts；reset时显式down -v删除数据。前端字体依赖Google Fonts，离线回退serif/sans-serif。模型是简化安全门禁，非完整Raft实现。MIT许可。
 
 枚举：角色在backend/src/constants/enums.py和frontend/src/constants/enums.js；任务状态同处定义，使用于models/entities.py、services/drill_service.py、worker.py、components/common/status.js；节点角色在schemas/node.py、pages/nodes.js。测试、截图与已知差异见批次test-artifacts/gb-4110/TESTING.md。
+
+## 离线库位额度（值班组断网演练）
+新增 `05 离线库位额度` 页面与 `/api/quota/*` 接口，用本地账本演练「节点断网时继续接库位预留」。
+
+- 每节点一个额度池（`quota_pools`），总容量可配置；全局约束 **Σ已预留 + Σ在途转出 ≤ Σ总容量**，后端在每次写入前后校验，越界直接 409。
+- 节点状态：在线可写；**失联仍可本地预留**（使用本地剩余额度）；**已隔离则停写**（预留/调拨/补领全部拒绝）。页面可按节点模拟断网、隔离与恢复。
+- 调拨为两阶段：发起时源池 `in_transit_out` 立即占额并扣减剩余，接收方 `in_transit_in` 记账但**不能**提前使用；`POST /quota/transfers/{id}/credit` 补领后才把容量从源池移入目标池，`/rollback` 释放在途。
+- 中断恢复：接收节点失联时补领返回 409，调拨保持 `pending` 并显示卡住原因；恢复后 `POST /quota/claim` 批量补领，只处理仍挂起且两端健康的单子，重复调用不会重复到账。
+- 幂等：预留用 `(pool_id, idem_key)`、调拨用 `(from_pool_id, idem_key)` 唯一约束；重放返回原记录（`replayed=true`），同键不同金额 409。
+- 并发：MySQL 下锁定全部池行实现账本串行化；SQLite 本地测试退化为进程内互斥锁，语义一致。测试 `backend/tests/` 覆盖断网、隔离、越界、在途双花、补领重试与并发抢额（21 条，SQLite 直跑：`cd backend && PYTHONPATH=. python -m pytest tests -q`）。
+- 演示 seed 为三个节点各建 900 容量池；`quota_events` 是只追加的账本流水，页面底部可核对最近事件与卡住原因。
